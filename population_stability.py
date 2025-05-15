@@ -547,6 +547,7 @@ class AnalyzeLFP():
         self.LFP_dict = LFP_dict
         self.session = LFP_dict['session']
         self.trial_nums = LFP_dict['trial_nums']
+        self.has_PSD = False
         
         
     def _get_PSD(self):
@@ -583,6 +584,7 @@ class AnalyzeLFP():
                     first_run = False
                     
                 self.PSD[trial,ch,:] = psd
+                self.has_PSD = True
                 
                 assert np.array_equal(self.f,f) #make sure freqs are equal throughout
                 
@@ -591,7 +593,8 @@ class AnalyzeLFP():
 
     def get_grandavg_band_powers(self,freq_band):
         
-        self._get_PSD()
+        if not self.has_PSD:
+            self._get_PSD()
        
         #get desired frequencies
         band = (self.f > FREQ_BANDS[freq_band][0]) & (self.f < FREQ_BANDS[freq_band][1])
@@ -722,7 +725,7 @@ class AnalyzeLFP():
                         fmax = fmax,
                         # cwt_freqs = freqs,
                         # cwt_n_cycles = freqs / 4,
-                        verbose = False,
+                        verbose = 'CRITICAL',
                         )
                      
             self.f = np.array(connectivity.freqs)
@@ -731,7 +734,7 @@ class AnalyzeLFP():
             #get desired frequencies
             band = (self.f > FREQ_BANDS[freq_band][0]) & (self.f < FREQ_BANDS[freq_band][1])
                 
-            self.wpli_dict = {block: np.mean(self.wpli[band])}
+            self.wpli_dict[block] = np.mean(self.wpli[band])
  
     
  
@@ -805,8 +808,39 @@ def plot_metric_longitudinally(list_of_metric_dicts):
     fig.tight_layout()
     
         
-        
-        
+
+def plot_metric_grid(metric,block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list):        
+    
+    #normalize to % of first session
+    theta_norm = np.array(theta_list)/theta_list[0] * 100
+    alpha_norm = np.array(alpha_list)/alpha_list[0] * 100
+    beta_norm = np.array(beta_list)/beta_list[0] * 100
+    low_gamma_norm = np.array(low_gamma_list)/low_gamma_list[0] * 100
+    high_gamma_norm = np.array(high_gamma_list)/high_gamma_list[0] * 100
+    
+    assert len(theta_norm) == len(SESSIONS)
+
+    x = np.arange(len(SESSIONS)) #time axis
+    y = np.arange(5) #freq axis (5 freq bins)
+
+    X,Y = np.meshgrid(x,y)
+
+    Z = np.array([theta_norm,alpha_norm,beta_norm,low_gamma_norm,high_gamma_norm])
+
+    fig,ax=plt.subplots()
+    c = ax.pcolormesh(X,Y,Z, vmin=-100,vmax=300,cmap='bwr')
+    fig.colorbar(c,ax=ax,label='% of 1st session')
+    
+    sessions = [session[4:4+8] for session in SESSIONS]
+    
+    ax.set_ylabel('Frequency')
+    ax.set_xlabel('Time (sessions)')
+    ax.set_xticks(x,sessions,rotation=-45,fontsize=SMALL_FONTSIZE)
+    ax.set_yticks(y,['theta','alpha','beta','low gamma','high gamma'],fontsize=SMALL_FONTSIZE)
+    ax.set_title(f'{metric} over freq and time, {block} trials only.')
+    fig.tight_layout()
+
+    return
     
     
 
@@ -819,13 +853,16 @@ def run_PSD_per_dir():
         lfp = ProcessLFP(session)
         
         AnalyzeLFP(lfp.LFP_dict).get_PSD_per_direction()
+        
+    return
+
   
         
 def run_WPLI(freq_band_name):
     
     metric_list = []
     
-    for session in SESSIONS:
+    for i,session in enumerate(SESSIONS):
         
         lfp = ProcessLFP(session)
         
@@ -833,18 +870,20 @@ def run_WPLI(freq_band_name):
         
         metric_list.append(wpli_dict)
         
-        print(f'{session} done! \n')
+        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
         
     plot_metric_longitudinally(metric_list)
     
-    print(f'{freq_band_name} done for {len(SESSIONS)} sessions!\n\n\n')
+    print(f'{freq_band_name} WPLI done for {len(SESSIONS)} sessions!\n\n\n')
+    
+    return
         
 
 def run_bandpower(freq_band_name):
     
     metric_list = []
     
-    for session in SESSIONS:
+    for i,session in enumerate(SESSIONS):
         
         lfp = ProcessLFP(session)
         
@@ -852,25 +891,101 @@ def run_bandpower(freq_band_name):
         
         metric_list.append(band_power_dict)
         
-        print(f'{session} done! \n')
+        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
         
     plot_metric_longitudinally(metric_list)
     
-    print(f'{freq_band_name} done for {len(SESSIONS)} sessions!\n\n\n')
+    print(f'{freq_band_name} power done for {len(SESSIONS)} sessions!\n\n\n')
+    
+    return
         
 
+def bandpower_grid(block):
+    
+    theta_list = []
+    alpha_list = []
+    beta_list = []
+    low_gamma_list = []
+    high_gamma_list = []
+    
+    for i,session in enumerate(SESSIONS):
+        
+        lfp = ProcessLFP(session)
+        
+        lfp_analysis = AnalyzeLFP(lfp.LFP_dict)
+        
+        band_power_dict = lfp_analysis.get_grandavg_band_powers('theta')
+        theta_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_grandavg_band_powers('beta')
+        beta_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_grandavg_band_powers('alpha')
+        alpha_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_grandavg_band_powers('low gamma')
+        low_gamma_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_grandavg_band_powers('high gamma')
+        high_gamma_list.append(band_power_dict[block])
+        
+        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
+        
+    plot_metric_grid('PSD',block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list)
+    
+    print(f'Band power grid done for {len(SESSIONS)} sessions!\n\n\n')
+    
+    return
+    
+
+def WPLI_grid(block):
+    
+    theta_list = []
+    alpha_list = []
+    beta_list = []
+    low_gamma_list = []
+    high_gamma_list = []
+    
+    for i,session in enumerate(SESSIONS):
+        
+        lfp = ProcessLFP(session)
+        
+        lfp_analysis = AnalyzeLFP(lfp.LFP_dict)
+        
+        band_power_dict = lfp_analysis.get_WPLI('theta')
+        theta_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_WPLI('beta')
+        beta_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_WPLI('alpha')
+        alpha_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_WPLI('low gamma')
+        low_gamma_list.append(band_power_dict[block])
+        band_power_dict = lfp_analysis.get_WPLI('high gamma')
+        high_gamma_list.append(band_power_dict[block])
+        
+        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
+        
+    plot_metric_grid('WPLI',block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list)
+    
+    print(f'Band power grid done for {len(SESSIONS)} sessions!\n\n\n')
+    
+    return
 
 
-run_bandpower('theta')
-run_bandpower('alpha')
-run_bandpower('beta')
-run_bandpower('gamma')
-run_bandpower('low gamma')
-run_bandpower('high gamma')
-run_WPLI('theta')
-run_WPLI('alpha')
-run_WPLI('beta')
-run_WPLI('gamma')
-run_WPLI('low gamma')
-run_WPLI('high gamma')
+
+# run_bandpower('theta')
+# run_bandpower('alpha')
+# run_bandpower('beta')
+# run_bandpower('gamma')
+# run_bandpower('low gamma')
+# run_bandpower('high gamma')
+# run_WPLI('theta')
+# run_WPLI('alpha')
+# run_WPLI('beta')
+# run_WPLI('gamma')
+# run_WPLI('low gamma')
+# run_WPLI('high gamma')
+# bandpower_grid('bl')
+# bandpower_grid('ep')
+# bandpower_grid('lp')
+WPLI_grid('bl')
+WPLI_grid('ep')
+WPLI_grid('lp')
+
         
