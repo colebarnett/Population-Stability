@@ -99,5 +99,7 @@ class CenterOut():
         
         target_xloc = table.root.task[:]['target'][:,0]
         target_yloc = table.root.task[:]['target'][:,2]
+        target_xloc = target_xloc[self.state_time[self.ind_target_prompt]]
+        target_yloc = target_yloc[self.state_time[self.ind_target_prompt]]
         target_loc_rads = np.array([fix(np.arctan2(y,x)) for y,x in zip(target_xloc, target_yloc)])
-        self.target_loc_degs = (np.array(target_loc_rads)*(180/np.pi)).astype(int)
+        self.target_loc_degs = (np.array(target_loc_rads)*(180/np.pi)).astype(int) # for each trial

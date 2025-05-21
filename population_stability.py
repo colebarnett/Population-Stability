@@ -6,27 +6,43 @@ Created on Thu May  1 14:35:03 2025
 """
 #### Define global things
 
+## Paths
+# DATA_FOLDER = r"C:\Users\coleb\Desktop\Santacruz Lab\Population Stability\Data"
+DATA_FOLDER = r"D:\Population Stability\Data"
+BMI_FOLDER = r"C:\Users\coleb\Desktop\Santacruz Lab\bmi_python"
+# DATA_FOLDER = r"F:\cole"
+# BMI_FOLDER = r"C:\Users\crb4972\Desktop\bmi_python"
+
+
 import os
 import sys
 import time
 import pickle
 import itertools
-
 import numpy as np
 import pandas as pd
+# from fooof import FOOOF
 from scipy import signal
 # import statsmodels.api as sm
+from scipy.optimize import curve_fit
 from matplotlib import pyplot as plt
 # from matplotlib_venn import venn2,venn3
 from mne_connectivity import spectral_connectivity_epochs
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 
 import Behavior
+import Sessions
+SESSIONS, GOOD_CH_DICT = Sessions.get_sessions()
+
 
 
 
 
 TEST = False
-CHS = np.arange(0,128,step=8,dtype=int) #define subset of channels to use
+# CHS = np.arange(0,128,step=8,dtype=int) #define subset of channels to use
+CHS = GOOD_CH_DICT[SESSIONS[0]]
+downsample_factor = 2
+CHS = CHS[::2]
 SNIPPET_DURATION = 0.9 #sec. Trials shorter than this will be discarded, trials longer this will be truncated.
 
 
@@ -37,284 +53,39 @@ FREQ_BANDS = {'theta':(3.5,8.5), # Define freq bands (Hz)
               'low gamma':(34.5,60.5),
               'high gamma':(60.5,200.5)}
 
+
 NUM_TRIALS_PER_BLOCK = 384 # 48 trial sets per block * 8 directions per trial set
 BL_TRIALS = slice(0,NUM_TRIALS_PER_BLOCK)
 EP_TRIALS = slice(NUM_TRIALS_PER_BLOCK,NUM_TRIALS_PER_BLOCK*3//2) #only look at the first half of this block
 LP_TRIALS = slice(NUM_TRIALS_PER_BLOCK*2,NUM_TRIALS_PER_BLOCK*3)
 
-SESSIONS = ["braz20220315_07_te90",
-            "braz20220321_04_te116",
-            "braz20220324_19_te176",
-            "braz20220401_05_te220",
-            "braz20220416_04_te294",
-            "braz20220425_04_te320",
-            "braz20220504_04_te376",
-            "braz20220510_04_te399",
-            "braz20220516_04_te425",
-            "braz20220611_04_te478",
-            "braz20220617_04_te498"]
 
 SMALL_FONTSIZE = 8
 MED_FONTSIZE = 12
 LARGE_FONTSIZE = 18
 
-# Paths
-DATA_FOLDER = r"C:\Users\coleb\Desktop\Santacruz Lab\Population Stability\Data"
-BMI_FOLDER = r"C:\Users\coleb\Desktop\Santacruz Lab\bmi_python"
-# PROJ_FOLDER = r"F:\cole"
-# BMI_FOLDER = r"C:\Users\crb4972\Desktop\bmi_python"
 
 
-# Import Neuroshare libraries from bmi_python folder
+
+## Import Neuroshare libraries from bmi_python folder
 NS_FOLDER = os.path.join(BMI_FOLDER, 'riglib', 'ripple', 'pyns', 'pyns')
 sys.path.insert(1,BMI_FOLDER) #add bmi_python folder to package search path
 sys.path.insert(2, NS_FOLDER) #add neuroshare python folder to package search path
 from nsfile import NSFile
-    
 os.chdir(DATA_FOLDER)
 
+def cosine_model(theta, MD, PD, avg_pwr):
+    """
+    Cosine function for lfp power fitting.
+    theta: angles (in radians)
+    MD: amplitude of cosine
+    PD: phase shift (preferred direction)
+    meanFR: baseline power level
+    """
+    return MD * np.cos(theta - PD) + avg_pwr
 
-
-
-class ProcessSpikes:
-    '''
-    From .mat, .hdf, and .nev files, load spike times and calculate firing rate 
-    aligned to task events.
-    
-    Output: DataFrame with firing rate for each unit for each trial
-    '''
-    
-    def __init__(self, session: str):
-
-        
-        self.session = session
-        self.file_prefix = os.path.join(DATA_FOLDER, self.session)
-        
-#         # [Initiate different data files]
-#         self.ns2file = None
-#         self.hdffile = None
-#         self.matfile = None
-#         self.pklfile = None
-#         self.ns5file = None
-#         self.nevfile = None
-        
-        ## Data
-        self.has_hdf = False # For behavior
-        self.has_ns5 = False # For syncing 
-        self.has_ns2 = False # For LFP
-        self.has_nev = False # For waveform 
-        self.has_decoder = False # For decoder
-        self.has_mat = False # For syncing
-        self.has_pkl = False # For spike times
-        self.check_files()
-        
-        ## Get Spike Times
-        self.spike_times = None 
-        self.unit_labels = None
-        if self.has_pkl:
-            self.load_spike_times()
-        else:
-            self.get_spike_times()
-        
-        ## Get Times Align
-        self.times_align = None
-        self.get_times_align()
-        
-        ## Get Firing Rates
-        self.firing_rate_df = None
-        self.t_before = 0.2 #how far to look before time_align point [s]
-        self.t_after = 0.0 #how far to look after time_align point [s]
-        self.get_firing_rate() 
-        
-        ## Save Out Processed Data
-        # self.df = pd.concat([self.behavior_df,self.firing_rate_df],axis='columns') #merge behavior_df and firing_rate_df
-        # self.dict_out = {'Name':session, 'df':self.df}
-        self.dict_out = {'Session':session, 'df':self.firing_rate_df}
-        
-        
-
-    def check_files(self):
-        """
-        For a proper analysis to be done,
-        the hdf, nev, mat, and pkl files are essential.
-        The ns5 and ns2 are optional.
-        """
-        
-        if os.path.exists(self.file_prefix + '.hdf'):
-            self.has_hdf = True
-        if os.path.exists(self.file_prefix + '.ns5'):
-            self.has_ns5 = True
-        if os.path.exists(self.file_prefix + '.ns2'):
-            self.has_ns2 = True
-        if os.path.exists(self.file_prefix + '.nev'):
-            self.has_nev = True
-        if os.path.exists(self.file_prefix + '_syncHDF.mat'):
-            self.has_mat = True
-        if os.path.exists(self.file_prefix + '_nev_output.pkl'):
-            self.has_nev_output = True
-        if os.path.exists(self.file_prefix + '_KFDecoder.pkl'):
-            self.has_decoder = True
-        if os.path.exists(self.file_prefix + '_spike_times_dict.pkl'):
-            self.has_pkl = True
-        
-          
-        
-    def get_spike_times(self):
-        
-        assert self.has_nev, FileNotFoundError(f'.nev file not found! Session: {self.session}')
-
-        ## Get Spike Times
-        print('Loading spike times..')
-        self.nevfile = NSFile(self.file_prefix + '.nev')
-        spike_entities = [e for e in self.nevfile.get_entities() if e.entity_type==3]
-        headers = np.array([s.get_extended_headers() for s in spike_entities]) #get info for each ch
-        # [print(i,h[b'NEUEVLBL'].label[:7]) for i,h in enumerate(headers) if b'NEUEVLBL' in h.keys()]
-        unit_idxs = np.nonzero([h[b'NEUEVWAV'].number_sorted_units for h in headers])[0] #get ch idxs where there is a sorted 
-        unit_idxs = [unit_idx for unit_idx in unit_idxs if b'NEUEVLBL' in headers[unit_idx].keys()] #exclude entities without NEUEVLBL field
-        if TEST: unit_idxs=unit_idxs[:3] #to make runtime shorter for testing
-        self.num_units = len(unit_idxs)
-        self.unit_labels = ["Unit " + h[b'NEUEVLBL'].label[:7].decode() + self.session for h in headers[unit_idxs] ] #get labels of all sorted units
-        # num_units_per_idx = [h[b'NEUEVWAV'].number_sorted_units for h in headers[unit_idxs]]
-        [print(f'More than one unit found for {h[b"NEUEVLBL"].label[:7]}!') for h in headers[unit_idxs] if h[b'NEUEVWAV'].number_sorted_units > 1]
-        recording_duration = self.nevfile.get_file_info().time_span # [sec]
-
-
-        self.spike_times = [] #each element is a list spike times for a sorted unit
-        # spike_waveforms = [] #each element is a list of waveforms for a sorted unit
-        for i,unit_idx in enumerate(unit_idxs): #loop thru sorted unit
-            unit = spike_entities[unit_idx]
-            self.spike_times.append([]) #initiate list of spike times for this unit
-            
-            for spike_idx in range(unit.item_count):
-                self.spike_times[i].append(unit.get_segment_data(spike_idx)[0])
-#                 spike_waveforms.append(unit.get_segment_data(spike_idx)[1])
-
-            print(f'{self.unit_labels[i]}: {unit.item_count} spikes. Avg FR: {unit.item_count/recording_duration:.2f} Hz. ({i+1}/{len(unit_idxs)})')
-        print('All spike times loaded!')
-        
-        # Save out spike times so we don't need to load them from nev again
-        spike_times_dict = {'unit_labels':self.unit_labels, 'spike_times':self.spike_times}
-        with open(self.file_prefix+'_spike_times_dict.pkl','wb') as f:
-            pickle.dump(spike_times_dict,f)
-            print(self.file_prefix+'_spike_times_dict.pkl saved!')
-        
-        return
-
-
-    def load_spike_times(self):
-        
-        # Load dict of previously saved spike times
-        with open(self.file_prefix+'_spike_times_dict.pkl','rb') as f:
-            spike_times_dict = pickle.load(f)
-            print(self.session+'_spike_times_dict.pkl' + ' loaded!')
-            
-        self.unit_labels = spike_times_dict['unit_labels']
-        self.spike_times = spike_times_dict['spike_times']
-        self.num_units = len(self.unit_labels)
-            
-        #print out FRs for funsies
-        for i,unit_spikes in enumerate(self.spike_times): #loop thru sorted unit
-            print(f'{self.unit_labels[i]}: {len(unit_spikes)} spikes. Avg FR: {len(unit_spikes)/(unit_spikes[-1]-unit_spikes[0]):.2f} Hz. ({i+1}/{len(self.unit_labels)})')
-        
-        return
-        
-    def get_times_align(self):
-        '''
-        Gets the array of indices (sample numbers) corresponding to the hold_center, 
-        target, and check_reward time points of the given session.
-        This facilitates time-aligned analyses.
-        
-        Parameters
-        ----------
-        hdf_files : list of hdf files for a single session
-        syncHDF_files : list of syncHDF_files files which are used to make the alignment between behavior data and spike data
-            
-        Outputs
-        -------
-        target_hold_TDT_ind : 1D array containing the TDT indices for the target hold onset times of the given session
-        '''
-        
-        assert self.has_hdf, FileNotFoundError(f'.hdf file not found! Session: {self.session}')
-        assert self.has_mat, FileNotFoundError(f'.mat file not found! Session: {self.session}')
-        
-        self.hdf_file = self.file_prefix + '.hdf'
-        self.syncHDF_file = self.file_prefix + '_syncHDF.mat'
-        
-        fs_hdf = 60 #hdf fs is always 60
-        
-        # load behavior data
-        cb = Behavior.CenterOut([self.hdf_file]) #method needs hdf filenames in a list
-        self.num_trials = cb.num_successful_trials
-        
-        # Find times of successful trials
-#         ind_hold_center = cb.ind_check_reward_states - 4 #times corresponding to hold center onset
-#         ind_mvmt_period = cb.ind_check_reward_states - 3 #times corresponding to target prompt
-#         ind_reward_period = cb.ind_check_reward_states #times corresponding to reward period onset
-        ind_target_hold = cb.ind_check_reward_states - 2 # times corresponding to target hold onset
-        
-        # align spike tdt times with hold center hdf indices using syncHDF files
-        target_hold_TDT_ind, DIO_freq = Behavior.get_HDFstate_TDT_LFPsamples(ind_target_hold,cb.state_time,self.syncHDF_file)
-
-        # Ensure that we have a 1 to 1 correspondence btwn indices we put in and indices we got out.
-        assert len(target_hold_TDT_ind) == len(ind_target_hold), f'Repeat hold times! Session: {self.session}'
-        assert len(target_hold_TDT_ind) == self.num_trials
-
-        self.times_align = target_hold_TDT_ind / DIO_freq
-        
-        
-        # #Plot to check things out
-        # tdt_times = target_hold_TDT_ind / DIO_freq / 60  #convert from samples to seocnds to minutes
-        # hdf_times = (cb.state_time[ind_target_hold]) / fs_hdf / 60  #convert from samples to seocnds to minutes
-        # fig,ax=plt.subplots()
-        # ax.set_title('TDT and HDF clock alignment')
-        # ax.set_xlabel('Time of Reward Period on TDT clock (min)')
-        # ax.set_ylabel('HDF clock time (min)')
-        # ax.plot(tdt_times,hdf_times,'o',alpha=0.5)
-        # ax.plot([0,np.max(tdt_times)],[0,np.max(tdt_times)],'k--') #unity line
-        # fig.suptitle(self.session)
-        # xxx
-        print('Alignment loaded!')
-
-        return 
-        
-        
-    def get_firing_rate(self):
-        '''
-        Count how many spikes occured in the time window of interest and then divide by window length.
-        Time window defined as [time_align - t_before : time_align + t_after]
-
-        Returns
-        -------
-        None.
-
-        '''
-
-        
-        
-        ## Get Spike Counts
-        print('Binning and counting spikes..')
-        firing_rates = np.zeros((self.num_trials,self.num_units))
-        for trial in range(self.num_trials):
-            
-            win_begin = self.times_align[trial] - self.t_before
-            win_end = self.times_align[trial] + self.t_after
-
-            for i in range(self.num_units):
-                
-                unit_spikes = np.array(self.spike_times[i])
-                num_spikes = sum( (unit_spikes>win_begin) & (unit_spikes<win_end) )
-                
-                firing_rates[trial,i] = num_spikes / (self.t_before + self.t_after)
-                
-        print('Done counting spikes!')
-
-        self.firing_rate_df = pd.DataFrame(firing_rates,columns=self.unit_labels)
-        # self.firing_rate_df['Trial'] = np.arange(self.num_trials)+1
-        self.firing_rate_df['Unit_labels'] = [self.unit_labels for i in range(self.num_trials)] 
-                
-        return 
-            
-        
+def zscore(list_):
+    return ( np.array(list_) - np.mean(list_) )/ np.std(list_)
 
 
 class ProcessLFP:
@@ -354,7 +125,6 @@ class ProcessLFP:
         if self.has_pkl:
             self.load_LFP_snippets() 
         else:
-            self.get_times_align()
             self.get_LFP_snippets() 
         
 
@@ -460,6 +230,8 @@ class ProcessLFP:
 
         '''
         
+        self.get_times_align()
+        
         print('Getting LFP snippets for each trial...')
         
         assert self.has_ns2, FileNotFoundError(f'.ns2 file not found! Session: {self.session}')
@@ -518,7 +290,7 @@ class ProcessLFP:
                         'chs': CHS,
                         'trial_nums': trials,
                         'trial_deg': self.deg[trials],
-                        'trial_cond': self.block_type[trials],
+                        # 'trial_cond': self.block_type[trials],
                         #'pert_type': self.pert,
                         #'pert_mag': self.pert_mag
                         }
@@ -536,6 +308,10 @@ class ProcessLFP:
             self.LFP_dict = pickle.load(f)
             print(self.session+'_LFP.pkl' + ' loaded!')
 
+        if not (list(self.LFP_dict['chs']) == list(CHS)):
+            print('Channel selection out of date! Must re-get snippets.')
+            self.get_LFP_snippets()
+        
         return
 
 
@@ -546,7 +322,7 @@ class AnalyzeLFP():
         
         self.LFP_dict = LFP_dict
         self.session = LFP_dict['session']
-        self.trial_nums = LFP_dict['trial_nums']
+        self.num_trials = len(LFP_dict['trial_nums'])
         self.has_PSD = False
         
         
@@ -566,7 +342,7 @@ class AnalyzeLFP():
         
         first_run = True # to use to initialize PSD array on first run only
         
-        for trial in range(len(self.trial_nums)):
+        for trial in range(self.num_trials):
             
             for ch in range(len(CHS)):
                 
@@ -574,23 +350,54 @@ class AnalyzeLFP():
                               nperseg=256,noverlap=None,nfft=256*4, #to get spectral res of about 1Hz
                               scaling='spectrum') #units = V**2
                 
-                f_trim = (f>4) & (f<200)
+                f_trim = (f>2) & (f<200)
                 f = f[f_trim]
                 psd = psd[f_trim]
                 
                 if first_run:
-                    self.PSD = np.zeros((len(self.trial_nums),len(CHS),len(f)))
+                    self.PSD = np.full((self.num_trials,len(CHS),len(f)),np.nan)
                     self.f = f
                     first_run = False
-                    
-                self.PSD[trial,ch,:] = psd
-                self.has_PSD = True
                 
+                if np.max(psd) != 0:
+                    self.PSD[trial,ch,:] = psd / np.max(psd) #normalize by max amplitude to make more comparable across different noise levels
+                # else:
+                #     print(f'Skipped cuz of invalid divide: trial {trial} ch {ch}')
+                    
                 assert np.array_equal(self.f,f) #make sure freqs are equal throughout
                 
+        self.has_PSD = True        
         return
     
-
+    def get_band_power_per_trial(self,freq_band):
+        ### DOES BASELINE TRIALS ONLY
+        
+        if not self.has_PSD:
+            self._get_PSD()
+       
+        #get desired frequencies
+        band = (self.f > FREQ_BANDS[freq_band][0]) & (self.f < FREQ_BANDS[freq_band][1])
+ 
+        
+        return zscore(np.nanmean(self.PSD[BL_TRIALS,:,band],axis=(1,2)))
+    
+    def get_LDA_params(self):
+        ### DOES BASELINE TRIALS ONLY
+        
+        X = np.full((NUM_TRIALS_PER_BLOCK,len(FREQ_BANDS)),np.nan)
+        
+        for i,freq_band in enumerate(FREQ_BANDS):
+            X[:,i] = self.get_band_power_per_trial(freq_band)
+        
+        y = self.LFP_dict['trial_deg'][:NUM_TRIALS_PER_BLOCK]
+        print(np.unique(self.LFP_dict['trial_deg']))
+        lda = LDA(solver='lsqr')
+        lda.fit(X,y)
+        print(lda.coef_)
+        print(lda.classes_)
+        xxx
+        return
+    
     def get_grandavg_band_powers(self,freq_band):
         
         if not self.has_PSD:
@@ -601,16 +408,11 @@ class AnalyzeLFP():
             
         self.band_power_dict = {'session':self.session,
                                 'metric_name':freq_band + ' power',
-                                'bl':np.mean(self.PSD[BL_TRIALS,:,band]),
-                                'ep':np.mean(self.PSD[EP_TRIALS,:,band]),
-                                'lp':np.mean(self.PSD[LP_TRIALS,:,band])}
+                                'bl':np.nanmean(self.PSD[BL_TRIALS,:,band]),
+                                'ep':np.nanmean(self.PSD[EP_TRIALS,:,band]),
+                                'lp':np.nanmean(self.PSD[LP_TRIALS,:,band])}
  
         return self.band_power_dict
-              
-
-    def get_PSD_per_trialset(self):
-        
-        return
 
 
     def get_PSD_per_direction(self):
@@ -626,8 +428,8 @@ class AnalyzeLFP():
             
             deg_trial_idxs = np.nonzero(self.LFP_dict['trial_deg'] == deg)
 
-            avg[i,:] = np.mean(np.squeeze(self.PSD[deg_trial_idxs,:,:]),axis=(0,1)) #avg over chs and trials
-            sem[i,:] = np.std(np.squeeze(self.PSD[deg_trial_idxs,:,:]),axis=(0,1)) / np.sqrt(len(deg_trial_idxs)) #sem with n=num_trials
+            avg[i,:] = np.nanmean(np.squeeze(self.PSD[deg_trial_idxs,:,:]),axis=(0,1)) #avg over chs and trials
+            sem[i,:] = np.nanstd(np.squeeze(self.PSD[deg_trial_idxs,:,:]),axis=(0,1)) / np.sqrt(len(deg_trial_idxs)) #sem with n=num_trials
             
         self.PSD_per_dir = {'session': self.session,
                             'deg': all_degs,
@@ -661,12 +463,90 @@ class AnalyzeLFP():
         return                
 
 
+    def get_PSD_PD(self,freq_band_name):
+        
+        self._get_PSD()
+        
+        print('Finding tuning curve for each ch..')
+        
+        self.PDs = np.full((len(CHS)),np.nan)
+        self.MDs = np.full_like(self.PDs,np.nan)
+        self.rss = 0
+        
+        all_degs = np.unique(self.LFP_dict['trial_deg'])
 
+        for ch in range(len(CHS)):
+                
+            #get desired frequencies
+            band = (self.f > FREQ_BANDS[freq_band_name][0]) & (self.f < FREQ_BANDS[freq_band_name][1]) 
+            
+            pwr_per_dir = np.zeros((len(all_degs)))
+            sem_per_dir = np.zeros_like(pwr_per_dir)
+            
+            #get power per direction
+            for i,deg in enumerate(all_degs):
+                
+                deg_trial_idxs = self.LFP_dict['trial_deg'] == deg
+
+                pwr_per_dir[i] = np.nanmean(self.PSD[np.ix_(deg_trial_idxs,[ch],band)]) #avg over trials and freq band
+                sem_per_dir[i] = np.nanstd(self.PSD[np.ix_(deg_trial_idxs,[ch],band)]) / np.sqrt(sum(deg_trial_idxs)) #sem w/ n=num_trials
+                
+            
+            ##fit PD tuning
+            
+            #initial guesses
+            avg_pwr_guess = np.mean(pwr_per_dir)
+            MD_guess = (np.max(pwr_per_dir) - np.min(pwr_per_dir)) / 2
+            PD_guess = np.deg2rad(all_degs[np.argmax(pwr_per_dir)])
+            
+            initial_guesses = [ #add some jitter to the initial guess
+                [MD_guess, PD_guess, avg_pwr_guess],
+                [MD_guess * 1.1, PD_guess + (np.pi / 8), avg_pwr_guess * 1.1],
+                [MD_guess * 0.9, PD_guess - (np.pi / 8), avg_pwr_guess * 0.9],
+            ]
+            
+            # Initialize default values in case fitting fails
+            MD, PD, meanFR, pred_fr = np.nan, np.nan, np.nan, np.nan
+            
+            #curve fit
+            for initial_guess in initial_guesses:
+                try:
+                    (MD, PD, avg_pwr), pcov = curve_fit(
+                        cosine_model, np.deg2rad(all_degs), pwr_per_dir,
+                        p0=initial_guess,
+                        bounds=([0, -2 * np.pi, -np.inf], [np.inf, 2 * np.pi, np.inf]))
+                except RuntimeError:
+                    continue  # Try the next initial guess if fitting fails
+           
+            if PD < 0:
+                PD += 2*np.pi
+                
+            #calc error
+            pred_pwr = cosine_model(np.deg2rad(all_degs), *(MD, PD, avg_pwr))
+            self.rss += np.sum((pwr_per_dir - pred_pwr)**2)
+            
+            # #plot
+            # fig,ax=plt.subplots()
+            # ax.errorbar(all_degs,pwr_per_dir,sem_per_dir,fmt='o',label='actual')
+            # theta_plot = np.linspace(0,2*np.pi,500)
+            # ax.plot(np.rad2deg(theta_plot),cosine_model(theta_plot,MD,PD,avg_pwr),label=f'fit: PD = {np.rad2deg(PD).round()}, MD = {MD.round(2)}')
+            # ax.legend()
+            # ax.set_title(f'ch {ch}, {freq_band_name} power')
+            # fig.suptitle(self.session)
+                
+
+                
+            self.PDs[ch] = PD
+            self.MDs[ch] = MD
+
+        print('All preferred directions found!')
+        
+        return self.PDs            
  
 
 
 
-    def get_WPLI(self,freq_band):
+    def get_WPLI_freq_band(self,freq_band):
         '''
         Get the session averaged time-freq representation of connectivity for each area
         
@@ -751,7 +631,105 @@ class AnalyzeLFP():
         
         return self.wpli_dict
         
+    
+    
+    def get_WPLI_all_bands(self,block):
+        '''
+        Get the session averaged time-freq representation of connectivity for each area
+        
+        Load time-aligned LFP snippets for each session and compute connectivity 
+        between brain areas according to the method specified by conn_method.
+        This connectivity metric is computed for each channel combination before
+        the grand average is computed. I.e. connectivity is computed for num_chs_area1 x num_chs_area2
+        combinations before being averaged to yield a single grand average of connectivity
+        btwn the two brain areas. These grand averages are then averaged across sessions.
 
+        Parameters
+        ----------
+        - conn_method : str. E.g. 'coh', 'wpli', 'cacoh'
+            Connectivity measure to compute.
+            See https://mne.tools/mne-connectivity/stable/generated/mne_connectivity.spectral_connectivity_epochs.html
+            for full list of options
+        - overwriteFlag: bool. 
+            If true, will not load previously saved results. Will get results anew and save them, overwriting previously saved results.
+            If false, will load previously save results (if available).        
+
+
+        Does not return anything, but results in new object attributes:
+        - t: 1D array of time points of time-freq representations of connectivity
+        - f: 1D array of frequency bins of time-freq representations of connectivity
+        - conn_eachsess: 3D array of trial-averaged time-freq representations of connectivity for each session.
+            shape = num_sessions x len(f) x len(t)
+        - conn_sessavg: 2D array of session-averaged time-freq representations of connectivity
+            shape = len(f) x len(t)
+
+        '''
+
+        
+        print('Getting WPLI..')
+         
+        #get all combinations of channels
+        ch_combos = np.array(list(itertools.combinations(self.LFP_dict['chs'], 2)))
+        sources = ch_combos[:,0]
+        targets = ch_combos[:,1]
+        
+        fmin=4
+        fmax=200
+        
+
+        if block=='bl':
+            trials = BL_TRIALS
+        elif block=='ep':
+            trials = EP_TRIALS
+        elif block=='lp':
+            trials = LP_TRIALS
+         
+        connectivity = spectral_connectivity_epochs(
+                    data = self.LFP_dict['LFP'][trials,:,:], 
+                    # names = session_data['chs']
+                    method = 'wpli',
+                    indices = (sources,targets),
+                    sfreq = self.LFP_dict['fs'],
+                    mode = 'fourier',
+                    fmin = fmin, 
+                    fmax = fmax,
+                    # cwt_freqs = freqs,
+                    # cwt_n_cycles = freqs / 4,
+                    verbose = 'CRITICAL',
+                    )
+                     
+        self.f = np.array(connectivity.freqs)
+        self.wpli = np.nanmean(connectivity.get_data(),axis=0) #avg across all ch combos
+
+            
+        #get desired frequencies
+        band = (self.f > FREQ_BANDS['theta'][0]) & (self.f < FREQ_BANDS['theta'][1])
+        theta = np.mean(self.wpli[band])
+        band = (self.f > FREQ_BANDS['alpha'][0]) & (self.f < FREQ_BANDS['alpha'][1])
+        alpha = np.mean(self.wpli[band])
+        band = (self.f > FREQ_BANDS['beta'][0]) & (self.f < FREQ_BANDS['beta'][1])
+        beta = np.mean(self.wpli[band])
+        band = (self.f > FREQ_BANDS['low gamma'][0]) & (self.f < FREQ_BANDS['low gamma'][1])
+        low_gamma = np.mean(self.wpli[band])
+        band = (self.f > FREQ_BANDS['high gamma'][0]) & (self.f < FREQ_BANDS['high gamma'][1])
+        high_gamma = np.mean(self.wpli[band])
+                
+                
+ 
+    
+ 
+        # fig,ax = plt.subplots()
+        # ax.loglog(self.f,self.wpli)
+        
+        # ax.spines['top'].set_visible(False)
+        # ax.spines['right'].set_visible(False)
+        # ax.set_xlabel('Freq (Hz)')
+        # ax.set_ylabel('Connectivity (WPLI)')
+        
+        # fig.suptitle(self.session)
+        # fig.tight_layout()
+        
+        return theta,alpha,beta,low_gamma,high_gamma
 
     
     
@@ -798,8 +776,8 @@ def plot_metric_longitudinally(list_of_metric_dicts):
     ax.plot(x,ep,label='EP',color='tab:orange')
     ax.plot(x,lp,label='LP',color='tab:green')
     
-    ax.set_ylabel(metric)
-    ax.set_xlabel('Time (sessions)')
+    ax.set_ylabel(metric,fontsize=MED_FONTSIZE)
+    ax.set_xlabel('Time (sessions)',fontsize=MED_FONTSIZE)
     ax.set_xticks(x,sessions,rotation=-45,fontsize=SMALL_FONTSIZE)
     ax.set_title(f'Longitudinal tracking of {metric}')
     ax.spines['top'].set_visible(False)
@@ -809,33 +787,44 @@ def plot_metric_longitudinally(list_of_metric_dicts):
     
         
 
-def plot_metric_grid(metric,block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list):        
+def plot_metric_grid(zscore_flag,metric,block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list):        
     
-    #normalize to % of first session
-    theta_norm = np.array(theta_list)/theta_list[0] * 100
-    alpha_norm = np.array(alpha_list)/alpha_list[0] * 100
-    beta_norm = np.array(beta_list)/beta_list[0] * 100
-    low_gamma_norm = np.array(low_gamma_list)/low_gamma_list[0] * 100
-    high_gamma_norm = np.array(high_gamma_list)/high_gamma_list[0] * 100
+    if zscore_flag:
+        theta = zscore(theta_list)
+        alpha = zscore(alpha_list)
+        beta = zscore(beta_list)
+        low_gamma = zscore(low_gamma_list)
+        high_gamma = zscore(high_gamma_list)
+        clabel='z-score PSD'
+        vmin,vmax=-2.5,2.5
+        
+    else:
+        theta = theta_list
+        alpha = alpha_list
+        beta = beta_list
+        low_gamma = low_gamma_list
+        high_gamma = high_gamma_list
+        clabel='wpli'
+        vmin,vmax=0,0.35
     
-    assert len(theta_norm) == len(SESSIONS)
+    assert len(theta) == len(SESSIONS)
 
     x = np.arange(len(SESSIONS)) #time axis
     y = np.arange(5) #freq axis (5 freq bins)
 
     X,Y = np.meshgrid(x,y)
 
-    Z = np.array([theta_norm,alpha_norm,beta_norm,low_gamma_norm,high_gamma_norm])
+    Z = np.array([theta,alpha,beta,low_gamma,high_gamma])
 
     fig,ax=plt.subplots()
-    c = ax.pcolormesh(X,Y,Z, vmin=-100,vmax=300,cmap='bwr')
-    fig.colorbar(c,ax=ax,label='% of 1st session')
+    c = ax.pcolormesh(X,Y,Z, vmin=vmin,vmax=vmax,cmap='bwr')
+    fig.colorbar(c,ax=ax,label=clabel)
     
-    sessions = [session[4:4+8] for session in SESSIONS]
+    sessions = [session[8:12] for session in SESSIONS]
     
-    ax.set_ylabel('Frequency')
-    ax.set_xlabel('Time (sessions)')
-    ax.set_xticks(x,sessions,rotation=-45,fontsize=SMALL_FONTSIZE)
+    ax.set_ylabel('Frequency',fontsize=MED_FONTSIZE)
+    ax.set_xlabel('Time (sessions)',fontsize=MED_FONTSIZE)
+    ax.set_xticks(x,sessions,rotation=-90,fontsize=SMALL_FONTSIZE)
     ax.set_yticks(y,['theta','alpha','beta','low gamma','high gamma'],fontsize=SMALL_FONTSIZE)
     ax.set_title(f'{metric} over freq and time, {block} trials only.')
     fig.tight_layout()
@@ -844,15 +833,68 @@ def plot_metric_grid(metric,block,theta_list,alpha_list,beta_list,low_gamma_list
     
     
 
-#### Run
 
-def run_PSD_per_dir():
+
+
+
+
+
+
+
+
+
+
+
+
+#### Run methods
+
+
+def run_getsnippets():
+    for i,session in enumerate(SESSIONS):
+        looptime_start = time.time()
+        
+        _ = ProcessLFP(session)
+        
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
+    return
     
-    for session in SESSIONS:
+    
+def run_PSD_PD(freq_band_name):
+    
+    
+    all_PDs = np.zeros((len(CHS),len(SESSIONS)))
+    
+    for i,session in enumerate(SESSIONS):
+        looptime_start = time.time()
         
         lfp = ProcessLFP(session)
         
-        AnalyzeLFP(lfp.LFP_dict).get_PSD_per_direction()
+        sess_PD = AnalyzeLFP(lfp.LFP_dict).get_PSD_PD(freq_band_name)
+        
+        all_PDs[:,i] = np.rad2deg(sess_PD)
+        
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
+        
+    PD_diff = np.diff(all_PDs,axis=1) #difference between sessions for each channel
+    
+    #find miminum angle (e.g. 350 -> -10)
+    PD_diff[PD_diff>180] -= 360 
+    PD_diff[PD_diff<-180] += 360 
+    
+    fig,ax = plt.subplots()
+    ax.hist(PD_diff[~np.isnan(PD_diff)].flatten())
+    ax.set_title(f'Difference in PD between adjacent sessions: {freq_band_name} power')
+    ax.set_xlabel('PD Difference (deg)')
+    ax.set_ylabel('Count')
+    
         
     return
 
@@ -864,13 +906,18 @@ def run_WPLI(freq_band_name):
     
     for i,session in enumerate(SESSIONS):
         
+        looptime_start = time.time()
+        
         lfp = ProcessLFP(session)
-        
         wpli_dict = AnalyzeLFP(lfp.LFP_dict).get_WPLI(freq_band_name)
-        
         metric_list.append(wpli_dict)
+        print(f'{session} done!')
         
-        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
         
     plot_metric_longitudinally(metric_list)
     
@@ -885,13 +932,27 @@ def run_bandpower(freq_band_name):
     
     for i,session in enumerate(SESSIONS):
         
-        lfp = ProcessLFP(session)
+        looptime_start = time.time()
         
-        band_power_dict = AnalyzeLFP(lfp.LFP_dict).get_grandavg_band_powers(freq_band_name)
+        # try:
+        if True: #to maintain indent when try commented out
+            lfp = ProcessLFP(session)
+            band_power_dict = AnalyzeLFP(lfp.LFP_dict).get_grandavg_band_powers(freq_band_name)
+            metric_list.append(band_power_dict)
+            print(f'{session} done!')
+          
+        # skip sessions that throw an error, but print out error
+        # except BaseException as err:
+        #     print("*"*20)
+        #     print(f"Unexpected {err=}, {type(err)=}")
+        #     print(f'{session} skipped!')
+        #     print("*"*20)
         
-        metric_list.append(band_power_dict)
-        
-        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
         
     plot_metric_longitudinally(metric_list)
     
@@ -900,7 +961,7 @@ def run_bandpower(freq_band_name):
     return
         
 
-def bandpower_grid(block):
+def run_bandpower_grid(block):
     
     theta_list = []
     alpha_list = []
@@ -910,8 +971,9 @@ def bandpower_grid(block):
     
     for i,session in enumerate(SESSIONS):
         
+        looptime_start = time.time()
+            
         lfp = ProcessLFP(session)
-        
         lfp_analysis = AnalyzeLFP(lfp.LFP_dict)
         
         band_power_dict = lfp_analysis.get_grandavg_band_powers('theta')
@@ -924,17 +986,23 @@ def bandpower_grid(block):
         low_gamma_list.append(band_power_dict[block])
         band_power_dict = lfp_analysis.get_grandavg_band_powers('high gamma')
         high_gamma_list.append(band_power_dict[block])
+    
+        print(f'{session} done!')
         
-        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
         
-    plot_metric_grid('PSD',block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list)
+    plot_metric_grid(True,'PSD',block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list)
     
     print(f'Band power grid done for {len(SESSIONS)} sessions!\n\n\n')
     
     return
     
 
-def WPLI_grid(block):
+def run_WPLI_grid(block):
     
     theta_list = []
     alpha_list = []
@@ -944,30 +1012,56 @@ def WPLI_grid(block):
     
     for i,session in enumerate(SESSIONS):
         
+        looptime_start = time.time()
+            
         lfp = ProcessLFP(session)
-        
         lfp_analysis = AnalyzeLFP(lfp.LFP_dict)
         
-        band_power_dict = lfp_analysis.get_WPLI('theta')
-        theta_list.append(band_power_dict[block])
-        band_power_dict = lfp_analysis.get_WPLI('beta')
-        beta_list.append(band_power_dict[block])
-        band_power_dict = lfp_analysis.get_WPLI('alpha')
-        alpha_list.append(band_power_dict[block])
-        band_power_dict = lfp_analysis.get_WPLI('low gamma')
-        low_gamma_list.append(band_power_dict[block])
-        band_power_dict = lfp_analysis.get_WPLI('high gamma')
-        high_gamma_list.append(band_power_dict[block])
+        theta,alpha,beta,low_gamma,high_gamma = lfp_analysis.get_WPLI_all_bands(block)
+        theta_list.append(theta)
+        alpha_list.append(alpha)
+        beta_list.append(beta)
+        low_gamma_list.append(low_gamma)
+        high_gamma_list.append(high_gamma)
+    
+        print(f'{session} done!')
         
-        print(f'{session} done! ({i+1}/{len(SESSIONS)})\n')
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
         
-    plot_metric_grid('WPLI',block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list)
+    plot_metric_grid(False,'WPLI',block,theta_list,alpha_list,beta_list,low_gamma_list,high_gamma_list)
     
     print(f'Band power grid done for {len(SESSIONS)} sessions!\n\n\n')
     
     return
 
 
+def run_LDA():
+    
+    for i,session in enumerate(SESSIONS):
+        
+        looptime_start = time.time()
+            
+        lfp = ProcessLFP(session)
+        params = AnalyzeLFP(lfp.LFP_dict).get_LDA_params()
+   
+        print(f'{session} done!')
+        
+        # timer
+        looptime = np.rint(time.time() - looptime_start)
+        num_loops_todo = len(SESSIONS)-i-1
+        time_left = np.round(looptime*num_loops_todo/60,2) #mins
+        print(f'Session {i+1}/{len(SESSIONS)} done. Approx time remaining: {time_left} mins.',end='\n')
+
+
+
+
+#### Run
+
+# run_getsnippets()
 
 # run_bandpower('theta')
 # run_bandpower('alpha')
@@ -981,11 +1075,21 @@ def WPLI_grid(block):
 # run_WPLI('gamma')
 # run_WPLI('low gamma')
 # run_WPLI('high gamma')
-# bandpower_grid('bl')
-# bandpower_grid('ep')
-# bandpower_grid('lp')
-WPLI_grid('bl')
-WPLI_grid('ep')
-WPLI_grid('lp')
+
+# run_bandpower_grid('bl')
+# run_bandpower_grid('ep')
+# run_bandpower_grid('lp')
+# run_WPLI_grid('bl')
+# run_WPLI_grid('ep')
+# run_WPLI_grid('lp')
+
+# run_PSD_PD('theta')
+# run_PSD_PD('alpha')
+run_PSD_PD('beta')
+# run_PSD_PD('gamma')
+# run_PSD_PD('low gamma')
+# run_PSD_PD('high gamma')
+
+# run_LDA()
 
         
